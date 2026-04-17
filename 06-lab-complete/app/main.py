@@ -120,6 +120,7 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────
+
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
@@ -127,6 +128,8 @@ app = FastAPI(
     docs_url="/docs" if settings.environment != "production" else None,
     redoc_url=None,
 )
+
+logger.info(f"DEBUG - API Key current: {settings.agent_api_key[:4]}****")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +148,8 @@ async def request_middleware(request: Request, call_next):
         # Security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers.pop("server", None)
+        if "server" in response.headers:
+            del response.headers["server"]
         duration = round((time.time() - start) * 1000, 1)
         logger.info(json.dumps({
             "event": "request",
@@ -192,7 +196,7 @@ def root():
 
 @app.post("/ask", response_model=AskResponse, tags=["Agent"])
 async def ask_agent(
-    body: AskRequest,
+    payload: AskRequest,
     request: Request,
     _key: str = Depends(verify_api_key),
 ):
@@ -201,26 +205,27 @@ async def ask_agent(
 
     **Authentication:** Include header `X-API-Key: <your-key>`
     """
+    
     # Rate limit per API key
     check_rate_limit(_key[:8])  # use first 8 chars as key bucket
 
     # Budget check
-    input_tokens = len(body.question.split()) * 2
+    input_tokens = len(payload.question.split()) * 2
     check_and_record_cost(input_tokens, 0)
 
     logger.info(json.dumps({
         "event": "agent_call",
-        "q_len": len(body.question),
+        "q_len": len(payload.question),
         "client": str(request.client.host) if request.client else "unknown",
     }))
 
-    answer = llm_ask(body.question)
+    answer = llm_ask(payload.question)
 
     output_tokens = len(answer.split()) * 2
     check_and_record_cost(0, output_tokens)
 
     return AskResponse(
-        question=body.question,
+        question=payload.question,
         answer=answer,
         model=settings.llm_model,
         timestamp=datetime.now(timezone.utc).isoformat(),

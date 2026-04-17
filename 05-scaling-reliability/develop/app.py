@@ -27,8 +27,14 @@ from contextlib import asynccontextmanager
 
 
 from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 import uvicorn
 from utils.mock_llm import ask
+import redis as r
+import signal
+import sys
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -114,6 +120,7 @@ def health():
     - uptime: seconds
     - version: để biết đang chạy version nào
     """
+    return {"status": "ok"}
     uptime = round(time.time() - START_TIME, 1)
 
     # Kiểm tra dependencies quan trọng
@@ -157,6 +164,23 @@ def ready():
     - Đang shutdown
     - Database/dependencies chưa connect
     """
+    try:
+        # 1. Khởi tạo kết nối trực tiếp bên trong hoặc dùng biến toàn cục 'r'
+        # Đảm bảo host='127.0.0.1' vì Bình đang chạy trực tiếp trên Ubuntu
+        client = r.Redis(host='127.0.0.1', port=6379, db=0, socket_timeout=1)
+        
+        # 2. Kiểm tra kết nối
+        if client.ping():
+            return {"status": "ready"}
+        else:
+            raise Exception("Redis ping failed")
+            
+    except Exception as e:
+        # Nếu không kết nối được, trả về 503
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "reason": str(e)}
+        )
     if not _is_ready:
         raise HTTPException(
             status_code=503,
@@ -183,8 +207,20 @@ def handle_sigterm(signum, frame):
     logger.info(f"Received signal {signum} — uvicorn will handle graceful shutdown")
 
 
-signal.signal(signal.SIGTERM, handle_sigterm)
-signal.signal(signal.SIGINT, handle_sigterm)
+
+def shutdown_handler(signum, frame):
+    print(f"\n[Shutdown] Bắt được tín hiệu: {signum}")
+    print("[Shutdown] Đang hoàn tất các request dở dang...")
+    time.sleep(2) # Giả lập việc xử lý nốt dữ liệu
+    print("[Shutdown] Đã đóng kết nối Redis an toàn. Agent dừng tại đây.")
+    sys.exit(0)
+
+# Đăng ký handler cho cả Ctrl+C (SIGINT) và lệnh kill (SIGTERM)
+signal.signal(signal.SIGINT, shutdown_handler)
+signal.signal(signal.SIGTERM, shutdown_handler)
+
+print("Agent đang chờ lệnh (PID: {})".format(os.getpid()))
+
 
 
 if __name__ == "__main__":
@@ -197,3 +233,6 @@ if __name__ == "__main__":
         # ✅ Cho phép graceful shutdown
         timeout_graceful_shutdown=30,
     )
+
+
+

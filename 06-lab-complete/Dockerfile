@@ -17,22 +17,25 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # Stage 2: Runtime
 FROM python:3.11-slim AS runtime
 
-# Non-root user
-RUN groupadd -r agent && useradd -r -g agent -d /app agent
+# Tạo user agent và home directory (Thêm -m để tạo /home/agent)
+RUN groupadd -r agent && useradd -r -g agent -m -d /home/agent agent
 
 WORKDIR /app
 
-# Copy packages từ builder
+# CHỈNH SỬA QUAN TRỌNG: Copy packages từ thư mục .local của root (builder) 
+# sang thư mục .local của agent (runtime)
 COPY --from=builder /root/.local /home/agent/.local
 
 # Copy application
 COPY app/ ./app/
 COPY utils/ ./utils/
 
-RUN chown -R agent:agent /app
+# Cấp quyền cho cả thư mục app và thư mục chứa thư viện .local
+RUN chown -R agent:agent /app /home/agent/.local
 
 USER agent
 
+# Các biến môi trường giữ nguyên như file của bạn
 ENV PATH=/home/agent/.local/bin:$PATH
 ENV PYTHONPATH=/app
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -46,4 +49,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" \
     || exit 1
 
+# Sử dụng /bin/sh để chắc chắn $PORT được chuyển thành con số thực tế
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

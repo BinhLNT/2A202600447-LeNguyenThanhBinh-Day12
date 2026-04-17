@@ -34,9 +34,9 @@ from utils.mock_llm import ask
 # ── Redis (optional — fallback to in-memory dict nếu không có Redis)
 try:
     import redis
-    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    _redis = redis.from_url(REDIS_URL, decode_responses=True)
-    _redis.ping()
+    REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    r = redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True)
+    r.ping()
     USE_REDIS = True
     print("✅ Connected to Redis")
 except Exception:
@@ -60,7 +60,7 @@ def save_session(session_id: str, data: dict, ttl_seconds: int = 3600):
     """Lưu session vào Redis với TTL."""
     serialized = json.dumps(data)
     if USE_REDIS:
-        _redis.setex(f"session:{session_id}", ttl_seconds, serialized)
+        r.setex(f"session:{session_id}", ttl_seconds, serialized)
     else:
         _memory_store[f"session:{session_id}"] = data
 
@@ -68,7 +68,7 @@ def save_session(session_id: str, data: dict, ttl_seconds: int = 3600):
 def load_session(session_id: str) -> dict:
     """Load session từ Redis."""
     if USE_REDIS:
-        data = _redis.get(f"session:{session_id}")
+        data = r.get(f"session:{session_id}")
         return json.loads(data) if data else {}
     return _memory_store.get(f"session:{session_id}", {})
 
@@ -128,32 +128,35 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 async def chat(body: ChatRequest):
     """
-    Multi-turn conversation với session management.
-
-    Gửi session_id trong các request tiếp theo để tiếp tục cuộc trò chuyện.
-    Agent có thể chạy trên bất kỳ instance nào — state trong Redis.
+    Exercise 5.3: Stateless Agent
+    Toàn bộ lịch sử được đẩy ra Redis, Agent không giữ bất kỳ dữ liệu nào trong RAM.
     """
-    # Tạo hoặc dùng session hiện có
+    # 1. Định danh phiên làm việc (State ID)
     session_id = body.session_id or str(uuid.uuid4())
 
-    # Thêm câu hỏi vào history
-    append_to_history(session_id, "user", body.question)
+    # --- BƯỚC QUAN TRỌNG: STATELESS LOGIC ---
+    
+    # 2. Lấy lịch sử cũ làm ngữ cảnh (Context)
+    # Thay vì load cả object session, ta chỉ lấy list history trực tiếp từ Redis
+    history = load_session(session_id).get("history", [])
 
-    # Gọi LLM với context (trong mock, ta chỉ dùng câu hỏi hiện tại)
-    session = load_session(session_id)
-    history = session.get("history", [])
+    # 3. Gọi LLM xử lý (Dựa trên câu hỏi và lịch sử nếu cần)
+    # Bình có thể truyền 'history' vào hàm ask nếu mock_llm hỗ trợ context
     answer = ask(body.question)
 
-    # Lưu response vào history
+    # 4. Cập nhật State mới (Stateless Write)
+    # Sử dụng hàm append_to_history mà chúng ta đã cấu hình dùng Redis rpush
+    append_to_history(session_id, "user", body.question)
     append_to_history(session_id, "assistant", answer)
 
+    # 5. Trả về kết quả kèm ID của Instance đang xử lý
     return {
         "session_id": session_id,
         "question": body.question,
         "answer": answer,
-        "turn": len([m for m in history if m["role"] == "user"]) + 1,
-        "served_by": INSTANCE_ID,  # ← thấy rõ bất kỳ instance nào cũng serve được
-        "storage": "redis" if USE_REDIS else "in-memory",
+        "turn": (len(history) // 2) + 1, 
+        "served_by": INSTANCE_ID,  # Chứng minh Load Balancing ở bài 5.4
+        "stateless_status": "✅ Đã lưu vào Redis" if USE_REDIS else "⚠️ Lưu tạm trong RAM",
     }
 
 
@@ -174,7 +177,7 @@ def get_history(session_id: str):
 def delete_session(session_id: str):
     """Xóa session (user logout)."""
     if USE_REDIS:
-        _redis.delete(f"session:{session_id}")
+        r.delete(f"session:{session_id}")
     else:
         _memory_store.pop(f"session:{session_id}", None)
     return {"deleted": session_id}
@@ -189,7 +192,7 @@ def health():
     redis_ok = False
     if USE_REDIS:
         try:
-            _redis.ping()
+            r.ping()
             redis_ok = True
         except Exception:
             redis_ok = False
@@ -209,7 +212,7 @@ def health():
 def ready():
     if USE_REDIS:
         try:
-            _redis.ping()
+            r.ping()
         except Exception:
             raise HTTPException(503, "Redis not available")
     return {"ready": True, "instance": INSTANCE_ID}
